@@ -1,10 +1,10 @@
 // =========================================================================
-// ⚙️ WORKER NODE ENGINE (Wrangler ES Module Format with Custom UA)
+// ⚙️ WORKER NODE ENGINE (Strict Single-Flight & Force Cache)
 // =========================================================================
 const ORIGIN_URL = "https://bdix.ottking.top:8082"; 
 const BACKEND_TOKEN = "bCO8cs194LW1v1";
 
-// ডুপ্লিকেট রিকোয়েস্ট লকিং ম্যাপ
+// গ্লোবাল ডুপ্লিকেট রিকোয়েস্ট লকিং ম্যাপ (Single-Flight)
 const pendingFetches = new Map();
 
 export default {
@@ -35,9 +35,6 @@ export default {
     const backendUrl = new URL(`${ORIGIN_URL}${url.pathname}${url.search}`);
     backendUrl.searchParams.set("token", BACKEND_TOKEN);
 
-    // 🎯 কাস্টম ইউজার এজেন্ট তৈরি (মনিটরিংয়ের সুবিধার জন্য)
-    // আপনি চাইলে wrangler.toml থেকে env ভেরিয়েবল বা ডোমেইন নাম দিয়েও নোড নাম্বার আলাদা করতে পারেন
-    // আপাতত ওয়ার্কারের নিজস্ব হোস্ট বা সাবডোমেইন থেকে নোড আইডি চেনার ব্যবস্থা রাখা হয়েছে
     const workerHost = url.hostname; 
     const customUserAgent = `ottking cache cdn 1.1 (${workerHost})`;
 
@@ -46,7 +43,7 @@ export default {
       const originResponse = await fetch(backendUrl.toString(), {
         method: "GET",
         headers: {
-          "User-Agent": customUserAgent, // কাস্টম ইউজার এজেন্ট ইনজেক্ট করা হলো
+          "User-Agent": customUserAgent,
           "Accept": "*/*"
         }
       });
@@ -67,10 +64,11 @@ export default {
       return new Response(content, { status: originResponse.status, headers });
     }
 
-    // ⚡ 3. Segment Handling with In-Memory Single Flight + Universal Cache Key
+    // ⚡ 3. Strict Segment Handling with Force Cache & Single-Flight
     if (isSegment) {
       const cache = caches.default;
       
+      // ইউনিক ক্যাশ কি তৈরি (কুয়েরি স্ট্রিং বা টোকেন বাদ দিয়ে)
       const cleanUrl = new URL(request.url);
       cleanUrl.search = '';
       cleanUrl.hash = '';
@@ -78,57 +76,71 @@ export default {
       const cacheKeyStr = cleanUrl.toString();
       const cacheKey = new Request(cacheKeyStr, { method: "GET" });
 
+      // ক) প্রথমে ক্লাউডফ্লেয়ার এজ ক্যাশ চেক করা
       let response = await cache.match(cacheKey);
 
-      if (!response) {
-        // একই সেগমেন্টের রিকোয়েস্ট অলরেডি অরিজিনে পেন্ডিং থাকলে নতুন রিকোয়েস্ট না পাঠিয়ে পূর্বের রিকোয়েস্টের প্রমিজ শেয়ার করবে
-        if (pendingFetches.has(cacheKeyStr)) {
-          const sharedResponse = await pendingFetches.get(cacheKeyStr);
-          response = sharedResponse.clone();
-        } else {
-          const fetchPromise = (async () => {
-            const originResponse = await fetch(backendUrl.toString(), {
-              method: "GET",
-              headers: {
-                "User-Agent": customUserAgent, // কাস্টম ইউজার এজেন্ট ইনজেক্ট করা হলো
-                "Accept": "*/*"
-              }
-            });
-            return originResponse;
-          })();
-
-          pendingFetches.set(cacheKeyStr, fetchPromise);
-
-          try {
-            const originResponse = await fetchPromise;
-
-            if (!originResponse.ok) {
-              return new Response(`Segment Error: ${originResponse.status}`, { status: originResponse.status });
-            }
-
-            const headers = new Headers();
-            headers.set("Content-Type", originResponse.headers.get("Content-Type") || "video/MP2T");
-            headers.set("Access-Control-Allow-Origin", "*");
-            headers.set("Cache-Control", "public, max-age=120, s-maxage=120");
-            headers.set("CF-Cache-Status", "MISS");
-
-            response = new Response(originResponse.body, { status: originResponse.status, headers });
-
-            if (originResponse.status === 200) {
-              ctx.waitUntil(cache.put(cacheKey, response.clone()));
-            }
-          } finally {
-            pendingFetches.delete(cacheKeyStr);
-          }
-        }
-      } else {
+      if (response) {
+        // ক্যাশ হিট হলে অরিজিনে যাওয়ার কোনো প্রশ্নই নেই
         const headers = new Headers(response.headers);
         headers.set("CF-Cache-Status", "HIT");
         headers.set("Access-Control-Allow-Origin", "*");
-        response = new Response(response.body, { status: response.status, headers });
+        return new Response(response.body, { status: response.status, headers });
       }
 
-      return response;
+      // খ) ক্যাশ মিস হলে সিঙ্গেল-ফ্লাইট লকিং চেক করা
+      if (pendingFetches.has(cacheKeyStr)) {
+        // ইতিমধ্যে সেইম সেগমেন্টের রিকোয়েস্ট অরিজিনে روان রয়েছে, তাই নতুন রিকোয়েস্ট না পাঠিয়ে আগেরটার রেসপন্স ক্লোন করে দেওয়া হবে
+        const sharedResponse = await pendingFetches.get(cacheKeyStr);
+        const headers = new Headers(sharedResponse.headers);
+        headers.set("CF-Cache-Status", "SHARED-HIT");
+        headers.set("Access-Control-Allow-Origin", "*");
+        return new Response(sharedResponse.body.clone(), { status: sharedResponse.status, headers });
+      }
+
+      // গ) যদি ক্যাশ বা রানিং প্রমিজ দুটোর কোনটা-ই না থাকে, তবে এক্সাক্টলি মাত্র ১টি রিকোয়েস্ট অরিজিনে যাবে
+      const fetchPromise = (async () => {
+        const originResponse = await fetch(backendUrl.toString(), {
+          method: "GET",
+          headers: {
+            "User-Agent": customUserAgent,
+            "Accept": "*/*"
+          }
+        });
+        return originResponse;
+      })();
+
+      pendingFetches.set(cacheKeyStr, fetchPromise);
+
+      try {
+        const originResponse = await fetchPromise;
+
+        if (!originResponse.ok) {
+          pendingFetches.delete(cacheKeyStr);
+          return new Response(`Segment Error: ${originResponse.status}`, { status: originResponse.status });
+        }
+
+        // রেসপন্স হেডার রি-রাইট করে ফোর্সেবল ক্যাশ এনাবল করা
+        const headers = new Headers();
+        headers.set("Content-Type", originResponse.headers.get("Content-Type") || "video/MP2T");
+        headers.set("Access-Control-Allow-Origin", "*");
+        // ব্রাউজার এবং ক্লাউডফ্লেয়ার এজের জন্য ক্যাশ টাইম বাড়িয়ে দেওয়া হলো (যেমন: ৩ মিনিট বা ১৮০ সেকেন্ড)
+        headers.set("Cache-Control", "public, max-age=180, s-maxage=180");
+        headers.set("CF-Cache-Status", "MISS");
+
+        const responseToClient = new Response(originResponse.body, { status: originResponse.status, headers });
+        const responseToCache = responseToClient.clone();
+
+        // ব্যাকগ্রাউন্ডে ক্লাউডফ্লেয়ার ক্যাশে সেভ করে দেওয়া
+        ctx.waitUntil(cache.put(cacheKey, responseToCache));
+
+        return responseToClient;
+
+      } catch (err) {
+        return new Response(`Fetch Exception: ${err.message}`, { status: 500 });
+      } finally {
+        // কাজ শেষ হলে ম্যাপ থেকে রিমুভ করে দেওয়া যাতে মেমরি লিক না হয়
+        pendingFetches.delete(cacheKeyStr);
+      }
     }
   }
 };
