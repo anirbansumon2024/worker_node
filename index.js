@@ -1,5 +1,5 @@
 // =========================================================================
-// ⚙️ WORKER NODE ENGINE (Wrangler ES Module Format)
+// ⚙️ WORKER NODE ENGINE (Wrangler ES Module Format with Custom UA)
 // =========================================================================
 const ORIGIN_URL = "https://bdix.ottking.top:8082"; 
 const BACKEND_TOKEN = "bCO8cs194LW1v1";
@@ -29,18 +29,24 @@ export default {
     const isSegment = pathname.endsWith('.ts') || pathname.endsWith('.m4a') || pathname.endsWith('.m4s') || pathname.endsWith('.aac');
 
     if (!isManifest && !isSegment) {
-      return new Response("NOT FOUN", { status: 404});
+      return new Response("Invalid Endpoint", { status: 403 });
     }
 
     const backendUrl = new URL(`${ORIGIN_URL}${url.pathname}${url.search}`);
     backendUrl.searchParams.set("token", BACKEND_TOKEN);
+
+    // 🎯 কাস্টম ইউজার এজেন্ট তৈরি (মনিটরিংয়ের সুবিধার জন্য)
+    // আপনি চাইলে wrangler.toml থেকে env ভেরিয়েবল বা ডোমেইন নাম দিয়েও নোড নাম্বার আলাদা করতে পারেন
+    // আপাতত ওয়ার্কারের নিজস্ব হোস্ট বা সাবডোমেইন থেকে নোড আইডি চেনার ব্যবস্থা রাখা হয়েছে
+    const workerHost = url.hostname; 
+    const customUserAgent = `ottking cache cdn 1.1 (${workerHost})`;
 
     // 📺 2. Manifest Handling (.m3u8 / .mpd)
     if (isManifest) {
       const originResponse = await fetch(backendUrl.toString(), {
         method: "GET",
         headers: {
-          "User-Agent": request.headers.get("User-Agent") || "Mozilla/5.0",
+          "User-Agent": customUserAgent, // কাস্টম ইউজার এজেন্ট ইনজেক্ট করা হলো
           "Accept": "*/*"
         }
       });
@@ -84,7 +90,7 @@ export default {
             const originResponse = await fetch(backendUrl.toString(), {
               method: "GET",
               headers: {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "User-Agent": customUserAgent, // কাস্টম ইউজার এজেন্ট ইনজেক্ট করা হলো
                 "Accept": "*/*"
               }
             });
