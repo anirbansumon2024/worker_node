@@ -1,5 +1,5 @@
 // =========================================================================
-// ⚙️ ULTIMATE SHIELD CDN WORKER NODE (FORCE EDGE CACHE 5.0)
+// ⚙️ ULTIMATE CDN ORIGIN-SHIELD WORKER ENGINE (FORCE CACHE LOCK)
 // =========================================================================
 const ORIGIN_URL = "https://bdix.ottking.top:8082"; 
 const BACKEND_TOKEN = "bCO8cs194LW1v1";
@@ -30,15 +30,19 @@ export default {
       return new Response("Invalid Endpoint", { status: 403 });
     }
 
-    // 🎯 UNIVERSAL CLEAN URL (토큰 ও কোয়েরি স্ট্রিং টোটালি রিমুভ)
+    const cache = caches.default;
+
+    // 🎯 PERFECT GLOBAL CACHE KEY (Header/Query neutral Request object)
     const cleanUrl = new URL(request.url);
     cleanUrl.search = '';
     cleanUrl.hash = '';
 
-    const cacheKey = new Request(cleanUrl.toString(), { method: "GET" });
-    const cache = caches.default;
+    // Cache key-te header completely stripped rakha jate edge cache conflict na kore
+    const cacheKey = new Request(cleanUrl.toString(), {
+      method: "GET"
+    });
 
-    // 1️⃣ GLOBAL EDGE CACHE CHECK
+    // 1️⃣ GLOBAL EDGE CACHE MATCH CHECK
     let cachedResponse = await cache.match(cacheKey);
     if (cachedResponse) {
       const headers = new Headers(cachedResponse.headers);
@@ -47,7 +51,7 @@ export default {
       return new Response(cachedResponse.body, { status: cachedResponse.status, headers });
     }
 
-    // 2️⃣ SINGLE-FLIGHT LOCKING
+    // 2️⃣ SINGLE-FLIGHT LOCKING (Concurrent edge fetch prevention)
     const cacheKeyStr = cacheKey.url;
     if (pendingFetches.has(cacheKeyStr)) {
       const sharedResponse = await pendingFetches.get(cacheKeyStr);
@@ -57,12 +61,12 @@ export default {
       return new Response(sharedResponse.body.clone(), { status: sharedResponse.status, headers });
     }
 
-    // 3️⃣ ORIGIN FETCH WITH CLOUDFLARE CACHE EVERYTHING DIRECTIVE
+    // 3️⃣ ORIGIN FETCH
     const backendUrl = new URL(`${ORIGIN_URL}${url.pathname}${url.search}`);
     backendUrl.searchParams.set("token", BACKEND_TOKEN);
 
     const workerHost = url.hostname; 
-    const customUserAgent = `ottking cdn-shield 6.0 (${workerHost})`;
+    const customUserAgent = `ottking cdn-shield 5.0 (${workerHost})`;
 
     const fetchPromise = (async () => {
       return await fetch(backendUrl.toString(), {
@@ -70,12 +74,6 @@ export default {
         headers: {
           "User-Agent": customUserAgent,
           "Accept": "*/*"
-        },
-        // 🚨 CRITICAL: Cloudflare-ke ফোর্স করা হচ্ছে অরিজিন থেকে এনে সরাসরি এজ ক্যাশে বসাতে
-        cf: {
-          cacheEverything: true,
-          cacheTtl: 2592000, // 30 Days Edge TTL
-          cacheTtlByStatus: { "200-299": 2592000, "404": 1, "500-599": 0 }
         }
       });
     })();
@@ -86,7 +84,7 @@ export default {
       const originResponse = await fetchPromise;
 
       if (!originResponse.ok) {
-        return new Response(`Origin Error: ${originResponse.status}`, { status: originResponse.status });
+        return new Response(`Origin Down/Error: ${originResponse.status}`, { status: originResponse.status });
       }
 
       let responseBody;
@@ -98,14 +96,14 @@ export default {
         responseBody = originResponse.body;
       }
 
-      // 🚨 AGGRESSIVE OVERWRITE HEADERS
+      // 🚨 STRIP ORIGIN NO-CACHE HEADERS & FORCE PUBLIC CACHE
       const forcedHeaders = new Headers();
       forcedHeaders.set("Access-Control-Allow-Origin", "*");
       forcedHeaders.set("Access-Control-Allow-Headers", "*");
       
       if (isManifest) {
         forcedHeaders.set("Content-Type", originResponse.headers.get("Content-Type") || "application/vnd.apple.mpegurl");
-        forcedHeaders.set("Cache-Control", "public, max-age=5, s-maxage=5");
+        forcedHeaders.set("Cache-Control", "public, max-age=6, s-maxage=6");
       } else {
         forcedHeaders.set("Content-Type", originResponse.headers.get("Content-Type") || "video/MP2T");
         forcedHeaders.set("Cache-Control", "public, max-age=2592000, s-maxage=2592000, immutable");
@@ -118,7 +116,7 @@ export default {
         headers: forcedHeaders 
       });
 
-      // 4️⃣ SAVE TO CACHE ENGINE
+      // 4️⃣ MANDATORY CLOUDFLARE EDGE SAVE
       ctx.waitUntil(cache.put(cacheKey, responseToClient.clone()));
 
       return responseToClient;
