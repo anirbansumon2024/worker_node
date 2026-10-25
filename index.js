@@ -1,10 +1,9 @@
 // =========================================================================
-// ⚙️ ULTIMATE FORCED-CACHE WORKER NODE ENGINE (Manifest + Segment)
+// ⚙️ ULTIMATE SHIELD CDN WORKER NODE (FORCE EDGE CACHE 5.0)
 // =========================================================================
 const ORIGIN_URL = "https://bdix.ottking.top:8082"; 
 const BACKEND_TOKEN = "bCO8cs194LW1v1";
 
-// Duplicate request locking map (Single-Flight)
 const pendingFetches = new Map();
 
 export default {
@@ -31,30 +30,25 @@ export default {
       return new Response("Invalid Endpoint", { status: 403 });
     }
 
-    const backendUrl = new URL(`${ORIGIN_URL}${url.pathname}${url.search}`);
-    backendUrl.searchParams.set("token", BACKEND_TOKEN);
-
-    const workerHost = url.hostname; 
-    const customUserAgent = `ottking cache cdn 3.0 (${workerHost})`;
-    const cache = caches.default;
-
-    // 🎯 Universal Clean Cache Key (Query string ba token bad diye)
+    // 🎯 UNIVERSAL CLEAN URL (토큰 ও কোয়েরি স্ট্রিং টোটালি রিমুভ)
     const cleanUrl = new URL(request.url);
     cleanUrl.search = '';
     cleanUrl.hash = '';
-    const cacheKeyStr = cleanUrl.toString();
-    const cacheKey = new Request(cacheKeyStr, { method: "GET" });
 
-    // 1️⃣ Edge Cache Check (Prothomei cache check korbe)
-    let response = await cache.match(cacheKey);
-    if (response) {
-      const headers = new Headers(response.headers);
+    const cacheKey = new Request(cleanUrl.toString(), { method: "GET" });
+    const cache = caches.default;
+
+    // 1️⃣ GLOBAL EDGE CACHE CHECK
+    let cachedResponse = await cache.match(cacheKey);
+    if (cachedResponse) {
+      const headers = new Headers(cachedResponse.headers);
       headers.set("CF-Cache-Status", "HIT");
       headers.set("Access-Control-Allow-Origin", "*");
-      return new Response(response.body, { status: response.status, headers });
+      return new Response(cachedResponse.body, { status: cachedResponse.status, headers });
     }
 
-    // 2️⃣ Single-Flight Check (Same segment duplicate request stop korbe)
+    // 2️⃣ SINGLE-FLIGHT LOCKING
+    const cacheKeyStr = cacheKey.url;
     if (pendingFetches.has(cacheKeyStr)) {
       const sharedResponse = await pendingFetches.get(cacheKeyStr);
       const headers = new Headers(sharedResponse.headers);
@@ -63,13 +57,25 @@ export default {
       return new Response(sharedResponse.body.clone(), { status: sharedResponse.status, headers });
     }
 
-    // 3️⃣ Fetch from Origin
+    // 3️⃣ ORIGIN FETCH WITH CLOUDFLARE CACHE EVERYTHING DIRECTIVE
+    const backendUrl = new URL(`${ORIGIN_URL}${url.pathname}${url.search}`);
+    backendUrl.searchParams.set("token", BACKEND_TOKEN);
+
+    const workerHost = url.hostname; 
+    const customUserAgent = `ottking cdn-shield 6.0 (${workerHost})`;
+
     const fetchPromise = (async () => {
       return await fetch(backendUrl.toString(), {
         method: "GET",
         headers: {
           "User-Agent": customUserAgent,
           "Accept": "*/*"
+        },
+        // 🚨 CRITICAL: Cloudflare-ke ফোর্স করা হচ্ছে অরিজিন থেকে এনে সরাসরি এজ ক্যাশে বসাতে
+        cf: {
+          cacheEverything: true,
+          cacheTtl: 2592000, // 30 Days Edge TTL
+          cacheTtlByStatus: { "200-299": 2592000, "404": 1, "500-599": 0 }
         }
       });
     })();
@@ -80,49 +86,45 @@ export default {
       const originResponse = await fetchPromise;
 
       if (!originResponse.ok) {
-        pendingFetches.delete(cacheKeyStr);
         return new Response(`Origin Error: ${originResponse.status}`, { status: originResponse.status });
       }
 
-      let bodyContent = null;
+      let responseBody;
       if (isManifest) {
         let text = await originResponse.text();
         const tokenRegex = new RegExp(`[?&]token=${BACKEND_TOKEN}`, 'g');
-        text = text.replace(tokenRegex, '');
-        bodyContent = text;
+        responseBody = text.replace(tokenRegex, '');
       } else {
-        bodyContent = originResponse.body;
+        responseBody = originResponse.body;
       }
 
-      // 🚨 FORCE OVERWRITE HEADERS (Main server-er no-cache ignore korar jonno)
-      const headers = new Headers();
-      headers.set("Access-Control-Allow-Origin", "*");
+      // 🚨 AGGRESSIVE OVERWRITE HEADERS
+      const forcedHeaders = new Headers();
+      forcedHeaders.set("Access-Control-Allow-Origin", "*");
+      forcedHeaders.set("Access-Control-Allow-Headers", "*");
       
       if (isManifest) {
-        headers.set("Content-Type", originResponse.headers.get("Content-Type") || "application/vnd.apple.mpegurl");
-        // Manifest-er jonno short cache (jemon 10 second, take live stream update thake kintu main server hit kome jay)
-        headers.set("Cache-Control", "public, max-age=10, s-maxage=10");
+        forcedHeaders.set("Content-Type", originResponse.headers.get("Content-Type") || "application/vnd.apple.mpegurl");
+        forcedHeaders.set("Cache-Control", "public, max-age=5, s-maxage=5");
       } else {
-        headers.set("Content-Type", originResponse.headers.get("Content-Type") || "video/MP2T");
-        // Segment-er jonno long cache (jemon 300 second ba 5 min)
-        headers.set("Cache-Control", "public, max-age=300, s-maxage=300");
+        forcedHeaders.set("Content-Type", originResponse.headers.get("Content-Type") || "video/MP2T");
+        forcedHeaders.set("Cache-Control", "public, max-age=2592000, s-maxage=2592000, immutable");
       }
 
-      if (originResponse.headers.get("X-Sid")) {
-        headers.set("X-Sid", originResponse.headers.get("X-Sid"));
-      }
-      headers.set("CF-Cache-Status", "MISS");
+      forcedHeaders.set("CF-Cache-Status", "MISS");
 
-      const responseToClient = new Response(bodyContent, { status: originResponse.status, headers });
-      const responseToCache = responseToClient.clone();
+      const responseToClient = new Response(responseBody, { 
+        status: originResponse.status, 
+        headers: forcedHeaders 
+      });
 
-      // 4️⃣ Background Cache Save
-      ctx.waitUntil(cache.put(cacheKey, responseToCache));
+      // 4️⃣ SAVE TO CACHE ENGINE
+      ctx.waitUntil(cache.put(cacheKey, responseToClient.clone()));
 
       return responseToClient;
 
     } catch (err) {
-      return new Response(`Fetch Exception: ${err.message}`, { status: 500 });
+      return new Response(`CDN Exception: ${err.message}`, { status: 500 });
     } finally {
       pendingFetches.delete(cacheKeyStr);
     }
